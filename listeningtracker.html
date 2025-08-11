@@ -20,7 +20,7 @@
   }
   h1 { margin:0 0 12px; font-size:1.4rem; }
   p { margin:.2rem 0 .8rem; color:var(--muted); }
-  input[type=text] {
+  input[type=text], input[type=file] {
     width:100%; padding:12px 14px; font-size:16px; border:1px solid #ccc; border-radius:10px;
   }
   button {
@@ -42,9 +42,15 @@
 <div id="startScreen" class="screen" style="display:flex">
   <div class="wrap">
     <h1>Listening Tracker</h1>
-    <p>Paste a <b>direct MP3 URL</b>. This site will log listening events and download them as a CSV file.</p>
+    <p>Paste an <b>MP3 file URL</b>. This site will log listening events and download them as a CSV file.</p>
     <div class="row">
       <input id="mp3Url" type="text" placeholder="https://example.com/file.mp3" style="flex:1;" />
+    </div><br>
+    <p><b>OR </b>upload a <b>local MP3 file</b>. This site will log listening events and download them as a CSV file.</p>
+    <div class="row">
+      <input id="mp3File" type="file" accept=".mp3,audio/mpeg" />
+    </div>
+    <div class="row" style="margin-top:1rem; justify-content:center;">
       <button id="startBtn" class="btn-start" disabled>Start</button>
     </div>
   </div>
@@ -74,6 +80,7 @@
 const startScreen = document.getElementById('startScreen');
 const playerScreen = document.getElementById('playerScreen');
 const urlInput = document.getElementById('mp3Url');
+const fileInput = document.getElementById('mp3File');
 const startBtn = document.getElementById('startBtn');
 const audio = document.getElementById('audio');
 const finishBtn = document.getElementById('finishBtn');
@@ -81,15 +88,13 @@ const hint = document.getElementById('hint');
 
 /* ---------- State ---------- */
 let mp3Url = '';
-let logRows = [];                // rows match HEADER order
-let totalListen = 0;             // seconds while actually playing (wall-clock)
-let lastPlayT = null;            // epoch ms when play last started/resumed
-let firstPlayAt = null;          // epoch ms of first real play
-let finishedAt = null;           // epoch ms when Finish clicked
-
-// Unique coverage tracker: which integer seconds of the audio have been heard
+let logRows = [];
+let totalListen = 0;
+let lastPlayT = null;
+let firstPlayAt = null;
+let finishedAt = null;
 let uniqueSecondsHeard = new Set();
-let prevPos = null;              // previous playback position to fill coverage between updates
+let prevPos = null;
 
 const HEADER = [
   "mp3_url","event_type","timestamp","audio_time_sec",
@@ -101,19 +106,18 @@ function looksLikeMP3(u){
   try { const x = new URL(u); return x.pathname.toLowerCase().endsWith('.mp3'); }
   catch(e){ return false; }
 }
-urlInput.addEventListener('input', ()=> startBtn.disabled = !looksLikeMP3(urlInput.value.trim()));
+function refreshStartDisabled(){
+  const hasFile = fileInput && fileInput.files && fileInput.files.length > 0;
+  const hasUrl  = looksLikeMP3(urlInput.value.trim());
+  startBtn.disabled = !(hasFile || hasUrl);
+}
+urlInput.addEventListener('input', refreshStartDisabled);
+fileInput.addEventListener('change', refreshStartDisabled);
 
-/* Human-readable, comma-free timestamp: YYYY-MM-DD HH:MM:SS */
 function nowTS(){
   const d = new Date();
   const pad = n => String(n).padStart(2,'0');
-  const Y = d.getFullYear();
-  const M = pad(d.getMonth()+1);
-  const D = pad(d.getDate());
-  const h = pad(d.getHours());
-  const m = pad(d.getMinutes());
-  const s = pad(d.getSeconds());
-  return `${Y}-${M}-${D} ${h}:${m}:${s}`;
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 function fmt(n){ return Number.isFinite(n) ? n.toFixed(2) : ""; }
 function csvEscape(v){
@@ -124,9 +128,8 @@ function csvEscape(v){
 function pushLog(type){
   const at = audio.currentTime || 0;
   const dur = audio.duration || 0;
-  const completionInstant = dur>0 ? (at/dur)*100 : 0; // per-event, not unique coverage
-  const row = [ mp3Url, type, nowTS(), fmt(at), fmt(audio.playbackRate||1), fmt(totalListen), fmt(completionInstant) ];
-  logRows.push(row);
+  const completionInstant = dur>0 ? (at/dur)*100 : 0;
+  logRows.push([ mp3Url, type, nowTS(), fmt(at), fmt(audio.playbackRate||1), fmt(totalListen), fmt(completionInstant) ]);
 }
 function accountListening(){
   if (lastPlayT !== null) {
@@ -134,24 +137,32 @@ function accountListening(){
     lastPlayT = Date.now();
   }
 }
-
-/* Add coverage between two positions (inclusive of integer seconds crossed) */
 function addCoverage(from, to){
   if (!Number.isFinite(from) || !Number.isFinite(to)) return;
   let start = Math.min(from, to);
   let end   = Math.max(from, to);
-  let s = Math.floor(start);
-  let e = Math.floor(end);
-  for (let t = s; t <= e; t++) uniqueSecondsHeard.add(t);
+  for (let t = Math.floor(start); t <= Math.floor(end); t++) uniqueSecondsHeard.add(t);
+}
+function startWithSource(src, label){
+  mp3Url = label;
+  audio.src = src;
+  hint.textContent = label;
+  startScreen.style.display = 'none';
+  playerScreen.style.display = 'flex';
 }
 
 /* ---------- Start ---------- */
 startBtn.addEventListener('click', ()=>{
-  mp3Url = urlInput.value.trim();
-  audio.src = mp3Url;
-  hint.textContent = mp3Url;
-  startScreen.style.display = 'none';
-  playerScreen.style.display = 'flex';
+  const file = fileInput?.files?.[0];
+  const url  = urlInput.value.trim();
+  if (file) {
+    const objURL = URL.createObjectURL(file);
+    startWithSource(objURL, `local:${file.name}`);
+  } else if (looksLikeMP3(url)) {
+    startWithSource(url, url);
+  } else {
+    alert('Please enter a valid .mp3 URL or choose a local MP3 file.');
+  }
 });
 
 /* ---------- Events ---------- */
@@ -162,55 +173,41 @@ audio.addEventListener('play', ()=>{
   pushLog('play');
 });
 audio.addEventListener('pause', ()=>{
-  // On pause, add coverage since last position update while it was playing
   addCoverage(prevPos ?? audio.currentTime, audio.currentTime);
   accountListening();
   lastPlayT = null;
   pushLog('pause');
 });
-
-// Track position updates for coverage
 audio.addEventListener('timeupdate', ()=>{
-  // timeupdate fires during playback as position advances (and after seeks)
   if (prevPos === null) { prevPos = audio.currentTime; return; }
-  // Only add coverage while playing
   if (!audio.paused) addCoverage(prevPos, audio.currentTime);
   prevPos = audio.currentTime;
 });
-
-// Speed buttons (in-grid)
 document.getElementById('speedGrid').addEventListener('click', (e)=>{
   const btn = e.target.closest('button[data-speed]');
   if(!btn) return;
   const s = parseFloat(btn.getAttribute('data-speed'));
-  // Add coverage up to this instant before changing rate
   addCoverage(prevPos ?? audio.currentTime, audio.currentTime);
   accountListening();
   audio.playbackRate = s;
   pushLog('speed_change');
 });
-
-// Seek tracking
 audio.addEventListener('seeking', ()=>{
-  // Count coverage up to the moment seeking started
   addCoverage(prevPos ?? audio.currentTime, audio.currentTime);
   accountListening();
 });
 audio.addEventListener('seeked', ()=>{
-  // After seeking, reset prevPos to new location
   prevPos = audio.currentTime;
   pushLog('seek');
   if (!audio.paused) lastPlayT = Date.now();
 });
-
 finishBtn.addEventListener('click', ()=>{
-  // Finalize coverage & listening time
   addCoverage(prevPos ?? audio.currentTime, audio.currentTime);
   accountListening();
   finishedAt = Date.now();
   pushLog('finish');
   downloadCSV();
-  finishBtn.disabled = true; // avoid double downloads
+  finishBtn.disabled = true;
 });
 
 /* ---------- CSV ---------- */
@@ -218,19 +215,15 @@ function downloadCSV(){
   const lines = [];
   lines.push(HEADER.join(','));
   for(const row of logRows) lines.push(row.map(csvEscape).join(','));
-
-  // Footer row: total listening duration (firstPlayAt → finishedAt) + TRUE completion from unique heard seconds
   if (firstPlayAt !== null && finishedAt !== null) {
     const deltaSec = (finishedAt - firstPlayAt) / 1000;
     const dur = audio.duration || 0;
-    const totalSeconds = Math.max(1, Math.ceil(dur)); // guard divide-by-zero
+    const totalSeconds = Math.max(1, Math.ceil(dur));
     const uniqueHeard = Math.min(uniqueSecondsHeard.size, totalSeconds);
     const trueCompletion = dur > 0 ? (uniqueHeard / totalSeconds) * 100 : 0;
-    // Put label in first column, total seconds in audio_time_sec column, completion in last column
     const footer = ['total listening duration', '', '', fmt(deltaSec), '', '', fmt(trueCompletion)];
     lines.push(footer.map(csvEscape).join(','));
   }
-
   const BOM = '\uFEFF';
   const csvText = BOM + lines.join('\r\n');
   const blob = new Blob([csvText], {type:'text/csv;charset=utf-8;'});
