@@ -7,7 +7,7 @@
 <style>
   :root {
     --bg:#ffffff; --text:#000; --muted:#555;
-    --primary:#007bff; --finish:#ff8800; --card:#fafafa;
+    --primary:#007bff; --finish:#ff8800; --card:#fafafa; --level:#4CAF50;
   }
   html, body {
     margin:0; height:100%; background:var(--bg); color:var(--text);
@@ -27,8 +27,9 @@
     border:none; border-radius:12px; padding:14px 0; font-size:16px; cursor:pointer; font-weight:600;
   }
   .btn-speed { background:var(--primary); color:#fff; }
-  .btn-start { background:var(--primary); color:#fff; width:160px; }
+  .btn-start { background:#007bff; color:#fff; width:300px; font-size:1.6rem; padding:18px 0; }
   .btn-finish { background:var(--finish); color:#fff; }
+  .btn-level { background:var(--level); color:#fff; padding:10px 12px; }
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   .mt { margin-top:12px; }
   audio { width:100%; margin:12px 0 8px; }
@@ -42,14 +43,26 @@
 <div id="startScreen" class="screen" style="display:flex">
   <div class="wrap">
     <h1>Listening Tracker</h1>
-    <p>Paste an <b>MP3 file URL</b>. This site will log listening events and download them as a CSV file.</p>
+    <p>Paste an <b>MP3 file URL</b>. This site logs listening events and downloads a CSV.</p>
     <div class="row">
       <input id="mp3Url" type="text" placeholder="https://example.com/file.mp3" style="flex:1;" />
     </div><br>
-    <p><b>OR </b>upload a <b>local MP3 file</b>. This site will log listening events and download them as a CSV file.</p>
+    <p><b>OR </b>upload a <b>local MP3 file</b>.</p>
     <div class="row">
       <input id="mp3File" type="file" accept=".mp3,audio/mpeg" />
     </div>
+
+    <!-- Student # + Level buttons (placeholders fill the URL box) -->
+    <div class="row mt">
+      <input id="studentId" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="Student # (optional)" style="flex:1;" />
+      <button class="btn-level" data-level="A1" type="button">A1</button>
+      <button class="btn-level" data-level="A2" type="button">A2</button>
+      <button class="btn-level" data-level="B1" type="button">B1</button>
+      <button class="btn-level" data-level="B2" type="button">B2</button>
+      <button class="btn-level" data-level="C1" type="button">C1</button>
+      <button class="btn-level" data-level="C2" type="button">C2</button>
+    </div>
+
     <div class="row" style="margin-top:1rem; justify-content:center;">
       <button id="startBtn" class="btn-start" disabled>Start</button>
     </div>
@@ -87,17 +100,25 @@ const finishBtn = document.getElementById('finishBtn');
 const hint = document.getElementById('hint');
 
 /* ---------- State ---------- */
+let studentTag = '';
 let mp3Url = '';
 let logRows = [];
-let totalListen = 0;
-let lastPlayT = null;
-let firstPlayAt = null;
-let finishedAt = null;
-let uniqueSecondsHeard = new Set();
-let prevPos = null;
 
+let totalListen = 0;        // seconds of actual listening (only while playing)
+let speedIntegral = 0;      // Σ(playbackRate * seconds) for weighted avg speed
+let lastPlayT = null;       // ms when playback last started/resumed
+let firstPlayAt = null;     // ms of the very first 'play'
+let finishedAt = null;
+
+let lastSeg = null;         // last 0.1s segment index seen while playing
+let lastEventWasSeek = false;
+
+// Unique listening segments at 0.1s resolution (store integer indices: floor(t*10))
+const listenedSegments = new Set();
+
+/* ---------- CSV header ---------- */
 const HEADER = [
-  "mp3_url","event_type","timestamp","audio_time_sec",
+  "student_number","mp3_url","event_type","timestamp","audio_time_sec",
   "playback_speed","total_listen_time_sec","completion_percent"
 ];
 
@@ -114,10 +135,33 @@ function refreshStartDisabled(){
 urlInput.addEventListener('input', refreshStartDisabled);
 fileInput.addEventListener('change', refreshStartDisabled);
 
+// Level placeholders (valid .mp3-looking URLs so Start enables)
+const LEVEL_PLACEHOLDERS = {
+  A1:'PLACEHOLDER-A1.mp3',
+  A2:'PLACEHOLDER-A2.mp3',
+  B1:'PLACEHOLDER-B1.mp3',
+  B2:'PLACEHOLDER-B2.mp3',
+  C1:'PLACEHOLDER-C1.mp3',
+  C2:'PLACEHOLDER-C2.mp3'
+};
+document.querySelectorAll('.btn-level').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    const lv = btn.getAttribute('data-level');
+    const url = LEVEL_PLACEHOLDERS[lv] || '';
+    urlInput.value = url;
+    if (fileInput) fileInput.value = ""; // ensure URL is used
+    refreshStartDisabled();
+  });
+});
+
 function nowTS(){
   const d = new Date();
   const pad = n => String(n).padStart(2,'0');
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+function stampDigits(d=new Date()){
+  const pad = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 function fmt(n){ return Number.isFinite(n) ? n.toFixed(2) : ""; }
 function csvEscape(v){
@@ -129,20 +173,25 @@ function pushLog(type){
   const at = audio.currentTime || 0;
   const dur = audio.duration || 0;
   const completionInstant = dur>0 ? (at/dur)*100 : 0;
-  logRows.push([ mp3Url, type, nowTS(), fmt(at), fmt(audio.playbackRate||1), fmt(totalListen), fmt(completionInstant) ]);
+  logRows.push([
+    studentTag, mp3Url, type, nowTS(),
+    fmt(at), fmt(audio.playbackRate||1),
+    fmt(totalListen), fmt(completionInstant)
+  ]);
 }
+
+// Accrue listening time only while actually playing
 function accountListening(){
+  if (firstPlayAt === null) return; // ignore anything before first Play
   if (lastPlayT !== null) {
-    totalListen += (Date.now() - lastPlayT)/1000;
-    lastPlayT = Date.now();
+    const now = Date.now();
+    const delta = (now - lastPlayT)/1000;
+    totalListen += delta;
+    speedIntegral += delta * (audio.playbackRate || 1);
+    lastPlayT = now;
   }
 }
-function addCoverage(from, to){
-  if (!Number.isFinite(from) || !Number.isFinite(to)) return;
-  let start = Math.min(from, to);
-  let end   = Math.max(from, to);
-  for (let t = Math.floor(start); t <= Math.floor(end); t++) uniqueSecondsHeard.add(t);
-}
+
 function startWithSource(src, label){
   mp3Url = label;
   audio.src = src;
@@ -153,6 +202,10 @@ function startWithSource(src, label){
 
 /* ---------- Start ---------- */
 startBtn.addEventListener('click', ()=>{
+  // establish student tag (entered or timestamp)
+  const entered = (document.getElementById('studentId')?.value || '').trim();
+  studentTag = entered || stampDigits(new Date());
+
   const file = fileInput?.files?.[0];
   const url  = urlInput.value.trim();
   if (file) {
@@ -169,61 +222,112 @@ startBtn.addEventListener('click', ()=>{
 audio.addEventListener('play', ()=>{
   if (firstPlayAt === null) firstPlayAt = Date.now();
   lastPlayT = Date.now();
-  prevPos = audio.currentTime;
+
+  // Initialize segment at current position
+  lastSeg = Math.floor((audio.currentTime || 0) * 10);
+  listenedSegments.add(lastSeg);
+
   pushLog('play');
 });
+
 audio.addEventListener('pause', ()=>{
-  addCoverage(prevPos ?? audio.currentTime, audio.currentTime);
   accountListening();
   lastPlayT = null;
   pushLog('pause');
 });
+
+// STRICT coverage: mark only segments actually played (no gap filling across seeks)
 audio.addEventListener('timeupdate', ()=>{
-  if (prevPos === null) { prevPos = audio.currentTime; return; }
-  if (!audio.paused) addCoverage(prevPos, audio.currentTime);
-  prevPos = audio.currentTime;
+  if (audio.paused || firstPlayAt === null) return;
+
+  const seg = Math.floor((audio.currentTime || 0) * 10);
+
+  if (lastSeg === null || lastEventWasSeek) {
+    // After a seek, only mark the current segment (do not backfill)
+    listenedSegments.add(seg);
+    lastSeg = seg;
+    lastEventWasSeek = false;
+    return;
+  }
+
+  if (seg === lastSeg) {
+    return; // same 0.1s segment
+  } else if (seg > lastSeg) {
+    // Normal forward progression while playing:
+    // Mark only the current segment; do NOT fill intermediate gaps,
+    // because large jumps could be silent/seek skips.
+    listenedSegments.add(seg);
+    lastSeg = seg;
+  } else if (seg < lastSeg) {
+    // Rewind occurred during playback
+    lastSeg = seg;
+    listenedSegments.add(seg);
+  }
 });
+
+audio.addEventListener('seeking', ()=>{
+  // Close listening interval up to this point (if we were playing)
+  accountListening();
+});
+audio.addEventListener('seeked', ()=>{
+  lastEventWasSeek = true; // next timeupdate: mark only the immediate segment
+  pushLog('seek');
+  if (!audio.paused && firstPlayAt !== null) lastPlayT = Date.now();
+});
+
 document.getElementById('speedGrid').addEventListener('click', (e)=>{
   const btn = e.target.closest('button[data-speed]');
   if(!btn) return;
   const s = parseFloat(btn.getAttribute('data-speed'));
-  addCoverage(prevPos ?? audio.currentTime, audio.currentTime);
+  if (!isNaN(s)) {
+    accountListening(); // finalize up to speed change if playing
+    audio.playbackRate = s;
+    if (!audio.paused && firstPlayAt !== null) lastPlayT = Date.now();
+    pushLog('speed_change');
+  }
+});
+
+audio.addEventListener('ended', ()=>{
+  // finalize on natural end
   accountListening();
-  audio.playbackRate = s;
-  pushLog('speed_change');
+  pushLog('ended');
 });
-audio.addEventListener('seeking', ()=>{
-  addCoverage(prevPos ?? audio.currentTime, audio.currentTime);
-  accountListening();
-});
-audio.addEventListener('seeked', ()=>{
-  prevPos = audio.currentTime;
-  pushLog('seek');
-  if (!audio.paused) lastPlayT = Date.now();
-});
+
 finishBtn.addEventListener('click', ()=>{
-  addCoverage(prevPos ?? audio.currentTime, audio.currentTime);
-  accountListening();
+  accountListening(); // finalize listening time
   finishedAt = Date.now();
   pushLog('finish');
   downloadCSV();
   finishBtn.disabled = true;
 });
 
-/* ---------- CSV ---------- */
+/* ---------- CSV & Completion ---------- */
+function strictCompletionPercent(){
+  const dur = audio.duration || 0;
+  if (dur <= 0) return 0;
+  const totalSegments = Math.max(1, Math.ceil(dur * 10)); // tenths
+  const uniqueListened = Math.min(listenedSegments.size, totalSegments);
+  return (uniqueListened / totalSegments) * 100;
+}
+
 function downloadCSV(){
   const lines = [];
   lines.push(HEADER.join(','));
   for(const row of logRows) lines.push(row.map(csvEscape).join(','));
+
+  // Overall footer (strict completion)
   if (firstPlayAt !== null && finishedAt !== null) {
-    const deltaSec = (finishedAt - firstPlayAt) / 1000;
-    const dur = audio.duration || 0;
-    const totalSeconds = Math.max(1, Math.ceil(dur));
-    const uniqueHeard = Math.min(uniqueSecondsHeard.size, totalSeconds);
-    const trueCompletion = dur > 0 ? (uniqueHeard / totalSeconds) * 100 : 0;
-    const footer = ['total listening duration', '', '', fmt(deltaSec), '', '', fmt(trueCompletion)];
+    const weightedSpeed = totalListen > 0 ? (speedIntegral / totalListen) : 0;
+    const completion = strictCompletionPercent();
+
+    // Footer: student_number, "overall", then metrics in their columns
+    const footer = [
+      studentTag, 'overall', '', '',               // mp3_url blank, event_type overall
+      '', fmt(weightedSpeed), fmt(totalListen), fmt(completion)
+    ];
     lines.push(footer.map(csvEscape).join(','));
   }
+
   const BOM = '\uFEFF';
   const csvText = BOM + lines.join('\r\n');
   const blob = new Blob([csvText], {type:'text/csv;charset=utf-8;'});
@@ -236,6 +340,9 @@ function downloadCSV(){
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+/* ---------- init ---------- */
+refreshStartDisabled();
 </script>
 </body>
 </html>
